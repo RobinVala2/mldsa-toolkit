@@ -58,7 +58,9 @@ def sign_with_capture(scheme, sk, m, ctx=b"", deterministic=True):
             c_hat = c.to_ntt()
 
             captured_intermediates['y'] = y
+            captured_intermediates['y_hat'] = y_hat
             captured_intermediates['w'] = w
+            captured_intermediates['w_hat'] = w.to_ntt()
             captured_intermediates['w1'] = w1
             captured_intermediates['c_tilde'] = c_tilde
             captured_intermediates['c'] = c
@@ -82,8 +84,10 @@ def sign_with_capture(scheme, sk, m, ctx=b"", deterministic=True):
                 continue
             
             captured_intermediates['c_s1'] = c_s1
+            captured_intermediates['c_s1_hat'] = c_s1.to_ntt()
             captured_intermediates['z'] = z
             captured_intermediates['c_s2'] = c_s2
+            captured_intermediates['c_s2_hat'] = c_s2.to_ntt()
             captured_intermediates['r0'] = r0
             captured_intermediates['c_t0'] = c_t0
             captured_intermediates['h'] = h
@@ -139,10 +143,38 @@ def reconstruct_all_intermediates(scheme, sk, sig, m, ctx=b"", rnd=None, determi
 
     y = z - c_s1
 
+    # # Normalize y coefficients [-q/2, q/2] to match value during sign
+    # q = scheme.R.q
+    # m, n = y.dim()
+    # y_normalized_coeffs = []
+    # if m >= n:
+    #     for i in range(m):
+    #         poly = y[i, 0]
+    #         poly_coeffs = []
+    #         for coeff in poly.coeffs:
+    #             coeff_reduced = coeff % q
+    #             if coeff_reduced > q // 2:
+    #                 coeff_reduced -= q
+    #             poly_coeffs.append(coeff_reduced)
+    #         y_normalized_coeffs.append(scheme.R(poly_coeffs))
+    # else:
+    #     for j in range(n):
+    #         poly = y[0, j]
+    #         poly_coeffs = []
+    #         for coeff in poly.coeffs:
+    #             coeff_reduced = coeff % q
+    #             if coeff_reduced > q // 2:
+    #                 coeff_reduced -= q
+    #             poly_coeffs.append(coeff_reduced)
+    #         y_normalized_coeffs.append(scheme.R(poly_coeffs))
+    # y = scheme.M.vector(y_normalized_coeffs)
+
+
     A_hat = scheme._expand_matrix_from_seed(rho)
     y_hat = y.to_ntt()
-    w = (A_hat @ y_hat).from_ntt()
-    
+    w_hat = (A_hat @ y_hat)
+    w = w_hat.from_ntt()
+
     alpha = scheme.gamma_2 << 1
     w1 = w.high_bits(alpha)
     
@@ -158,21 +190,27 @@ def reconstruct_all_intermediates(scheme, sk, sig, m, ctx=b"", rnd=None, determi
         'mu': mu,
         'rho_prime': rho_prime,
         'y': y,
+        'y_hat': y_hat,
         'w': w,
+        'w_hat': w_hat,
         'w1': w1,
         'c': c,
         'c_tilde': c_tilde,
         'c_s1': c_s1,
+        'c_s1_hat': c_s1_hat,
         'c_s2': c_s2,
+        'c_s2_hat': c_s2_hat,
         'r0': r0,
         'c_t0': c_t0,
         'z': z,
         'h': h,
+        "r0": r0,
     }
 
 def extract_coefficients(vector, reduce_mod_q=True):
     """
     Extract all coefficients from a vector.
+    If reduce_mod_q == True, reduce coefficients to [-q/2, q/2].
     """
     
     coeffs = []
@@ -183,57 +221,27 @@ def extract_coefficients(vector, reduce_mod_q=True):
         for i in range(m):
             poly = vector[i, 0]
             for c in poly.coeffs:
-                coeffs.append(c)
+                if reduce_mod_q:
+                    # Reduce to [-q/2, q/2]
+                    c_reduced = c % q
+                    if c_reduced > q // 2:
+                        c_reduced -= q
+                    coeffs.append(c_reduced)
+                else:
+                    coeffs.append(c)
     else:
         for j in range(n):
             poly = vector[0, j]
             for c in poly.coeffs:
-                coeffs.append(c)
+                if reduce_mod_q:
+                    c_reduced = c % q
+                    if c_reduced > q // 2:
+                        c_reduced -= q
+                    coeffs.append(c_reduced)
+                else:
+                    coeffs.append(c)
     
     return coeffs
-
-def compare_vectors(captured, reconstructed, reduce_mod_q=True):
-    """Compare two vectors and return match status and max difference."""  
-    try:
-        captured_dim = captured.dim()
-        reconstructed_dim = reconstructed.dim()
-
-        # print(f"Captured dimension: {captured_dim}")
-        # print(f"Reconstructed dimesnion: {reconstructed_dim}")
-        
-        captured_vec = captured
-        reconstructed_vec = reconstructed
-        
-        if captured_dim != reconstructed_dim:
-            if captured_dim == tuple(reversed(reconstructed_dim)):
-                try:
-                    captured_vec = captured.T
-                    captured_dim = captured_vec.dim()
-                except:
-                    pass
-            elif reconstructed_dim == tuple(reversed(captured_dim)):
-                try:
-                    reconstructed_vec = reconstructed.T
-                    reconstructed_dim = reconstructed_vec.dim()
-                except:
-                    pass
-            
-            if captured_dim != reconstructed_dim:
-                return False, None, f"Dimension mismatch: {captured.dim()} vs {reconstructed.dim()}"
-    except Exception:
-        return False, None, "Invalid object type"
-    
-    try:
-        diff = captured_vec - reconstructed_vec
-        # print(f"* Difference between the two vectors: {diff}")
-        diff_coeffs = extract_coefficients(diff, reduce_mod_q)
-        # print(f"* Difference between the coefficients: {diff_coeffs}")
-        diff_max = max(abs(c) for c in diff_coeffs) if diff_coeffs else 0
-        match = (diff_max == 0)
-        
-        return match, diff_max, None
-    except Exception as e:
-        return False, None, f"Comparison error: {str(e)}"
 
 def compare_bytes(captured, reconstructed):
     """Compare two byte arrays."""
@@ -303,16 +311,47 @@ def process_one_pair(scheme, sk, message, signature, sample_num):
     comparisons.append(('rho_prime', match, error))
     
     # Secret polynomial vector (sensitive)
-    match, diff_max, error = compare_vectors(captured.get('y'), reconstructed.get('y'), False)
-    comparisons.append(('y', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    y_captured_coeffs = extract_coefficients(captured.get('y'), reduce_mod_q=False)
+    y_reconstructed_coeffs = extract_coefficients(reconstructed.get('y'), reduce_mod_q=True)    # <--------!
+    y_diff = [a - b for a, b in zip(y_captured_coeffs, y_reconstructed_coeffs)]
+    print(f"* Difference between the two y vectors: {y_diff}")
+    y_diff_max = max(abs(c) for c in y_diff) if y_diff else 0
+    y_match = (y_diff_max == 0)
+    comparisons.append(('y', y_match, None if y_match else f"Max diff: {y_diff_max}"))
+
+    y_hat_captured_coeffs = extract_coefficients(captured.get('y_hat'), reduce_mod_q=False)
+    y_hat_reconstructed_coeffs = extract_coefficients(reconstructed.get('y_hat'), reduce_mod_q=False)
+    y_hat_diff = [a - b for a, b in zip(y_hat_captured_coeffs, y_hat_reconstructed_coeffs)]
+    print(f"!! Difference between the two y_hat vectors: {y_hat_diff}")
+    y_hat_diff_max = max(abs(c) for c in y_hat_diff) if y_hat_diff else 0
+    y_hat_match = (y_hat_diff_max == 0)
+    comparisons.append(('y_hat', y_hat_match, None if y_hat_match else f"Max diff: {y_hat_diff_max}"))
     
     # (sensitive)
-    match, diff_max, error = compare_vectors(captured.get('w'), reconstructed.get('w'), False)
-    comparisons.append(('w', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    w_captured_coeffs = extract_coefficients(captured.get('w'), reduce_mod_q=False)
+    w_reconstructed_coeffs = extract_coefficients(reconstructed.get('w'), reduce_mod_q=False)
+    w_diff = [a - b for a, b in zip(w_captured_coeffs, w_reconstructed_coeffs)]
+    print(f"!! Difference between the two w vectors: {w_diff}")
+    w_diff_max = max(abs(c) for c in w_diff) if w_diff else 0
+    w_match = (w_diff_max == 0)
+    comparisons.append(('w', w_match, None if w_match else f"Max diff: {w_diff_max}"))
+
+    w_hat_captured_coeffs = extract_coefficients(captured.get('w_hat'), reduce_mod_q=False)
+    w_hat_reconstructed_coeffs = extract_coefficients(reconstructed.get('w_hat'), reduce_mod_q=False)
+    w_hat_diff = [a - b for a, b in zip(w_hat_captured_coeffs, w_hat_reconstructed_coeffs)]
+    print(f"!! Difference between the two w_hat vectors: {w_hat_diff}")
+    w_hat_diff_max = max(abs(c) for c in w_hat_diff) if w_hat_diff else 0
+    w_hat_match = (w_hat_diff_max == 0)
+    comparisons.append(('w_hat', w_hat_match, None if w_hat_match else f"Max diff: {w_hat_diff_max}"))
     
     # Commitment (not sensitive)
-    match, diff_max, error = compare_vectors(captured.get('w1'), reconstructed.get('w1'), False)
-    comparisons.append(('w1', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    w1_captured_coeffs = extract_coefficients(captured.get('w1'), reduce_mod_q=False)
+    w1_reconstructed_coeffs = extract_coefficients(reconstructed.get('w1'), reduce_mod_q=False)
+    w1_diff = [a - b for a, b in zip(w1_captured_coeffs, w1_reconstructed_coeffs)]
+    print(f"!! Difference between the two w1 vectors: {w1_diff}")
+    w1_diff_max = max(abs(c) for c in w1_diff) if w1_diff else 0
+    w1_match = (w1_diff_max == 0)
+    comparisons.append(('w1', w1_match, None if w1_match else f"Max diff: {w1_diff_max}"))
     
     # (not sensitive)
     match, error = compare_polynomials(captured.get('c'), reconstructed.get('c'))
@@ -323,28 +362,88 @@ def process_one_pair(scheme, sk, message, signature, sample_num):
     comparisons.append(('c_tilde', match, error))
     
     # Used in computation of signer's response (z = y + cs1) (sensitive)
-    match, diff_max, error = compare_vectors(captured.get('c_s1'), reconstructed.get('c_s1'), False)
-    comparisons.append(('c_s1', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    c_s1_captured_coeffs = extract_coefficients(captured.get('c_s1'), reduce_mod_q=False)
+    c_s1_reconstructed_coeffs = extract_coefficients(reconstructed.get('c_s1'), reduce_mod_q=False)
+    c_s1_diff = [a - b for a, b in zip(c_s1_captured_coeffs, c_s1_reconstructed_coeffs)]
+    print(f"!! Difference between the two c_s1 vectors: {c_s1_diff}")
+    c_s1_diff_max = max(abs(c) for c in c_s1_diff) if c_s1_diff else 0
+    c_s1_match = (c_s1_diff_max == 0)
+    comparisons.append(('c_s1', c_s1_match, None if c_s1_match else f"Max diff: {c_s1_diff_max}"))
+
+    c_s1_hat_captured_coeffs = extract_coefficients(captured.get('c_s1_hat'), reduce_mod_q=False)
+    c_s1_hat_reconstructed_coeffs = extract_coefficients(reconstructed.get('c_s1_hat'), reduce_mod_q=False)
+    c_s1_hat_diff = [a - b for a, b in zip(c_s1_hat_captured_coeffs, c_s1_hat_reconstructed_coeffs)]
+    print(f"!! Difference between the two c_s1_hat vectors: {c_s1_hat_diff}")
+    c_s1_hat_diff_max = max(abs(c) for c in c_s1_hat_diff) if c_s1_hat_diff else 0
+    c_s1_hat_match = (c_s1_hat_diff_max == 0)
+    comparisons.append(('c_s1_hat', c_s1_hat_match, None if c_s1_hat_match else f"Max diff: {c_s1_hat_diff_max}"))
     
     # Used in computation of r0 (sensitive)
-    match, diff_max, error = compare_vectors(captured.get('c_s2'), reconstructed.get('c_s2'), False)
-    comparisons.append(('c_s2', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    c_s2_captured_coeffs = extract_coefficients(captured.get('c_s2'), reduce_mod_q=False)
+    c_s2_reconstructed_coeffs = extract_coefficients(reconstructed.get('c_s2'), reduce_mod_q=False)
+    c_s2_diff = [a - b for a, b in zip(c_s2_captured_coeffs, c_s2_reconstructed_coeffs)]
+    print(f"!! Difference between the two c_s2 vectors: {c_s2_diff}")
+    c_s2_diff_max = max(abs(c) for c in c_s2_diff) if c_s2_diff else 0
+    c_s2_match = (c_s2_diff_max == 0)
+    comparisons.append(('c_s2', c_s2_match, None if c_s2_match else f"Max diff: {c_s2_diff_max}"))
+
+    c_s2_hat_captured_coeffs = extract_coefficients(captured.get('c_s2_hat'), reduce_mod_q=False)
+    c_s2_hat_reconstructed_coeffs = extract_coefficients(reconstructed.get('c_s2_hat'), reduce_mod_q=False)
+    c_s2_hat_diff = [a - b for a, b in zip(c_s2_hat_captured_coeffs, c_s2_hat_reconstructed_coeffs)]
+    print(f"!! Difference between the two c_s2_hat vectors: {c_s2_hat_diff}")
+    c_s2_hat_diff_max = max(abs(c) for c in c_s2_hat_diff) if c_s2_hat_diff else 0
+    c_s2_hat_match = (c_s2_hat_diff_max == 0)
+    comparisons.append(('c_s2_hat', c_s2_hat_match, None if c_s2_hat_match else f"Max diff: {c_s2_hat_diff_max}"))
     
-    # Used for validity checks (final value not sensitive/intermediate values sensitive)
-    match, diff_max, error = compare_vectors(captured.get('r0'), reconstructed.get('r0'), False)
-    comparisons.append(('r0', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    # Used for validity checks
+    r0_captured_coeffs = extract_coefficients(captured.get('r0'), reduce_mod_q=False)
+    r0_reconstructed_coeffs = extract_coefficients(reconstructed.get('r0'), reduce_mod_q=False)
+    r0_diff = [a - b for a, b in zip(r0_captured_coeffs, r0_reconstructed_coeffs)]
+    print(f"!! Difference between the two r0 vectors: {r0_diff}")
+    r0_diff_max = max(abs(c) for c in r0_diff) if r0_diff else 0
+    r0_match = (r0_diff_max == 0)
+    comparisons.append(('r0', r0_match, None if r0_match else f"Max diff: {r0_diff_max}"))
     
     # Used in hint computation (not sensitive)
-    match, diff_max, error = compare_vectors(captured.get('c_t0'), reconstructed.get('c_t0'), False)
-    comparisons.append(('c_t0', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    c_t0_captured_coeffs = extract_coefficients(captured.get('c_t0'), reduce_mod_q=False)
+    c_t0_reconstructed_coeffs = extract_coefficients(reconstructed.get('c_t0'), reduce_mod_q=False)
+    c_t0_diff = [a - b for a, b in zip(c_t0_captured_coeffs, c_t0_reconstructed_coeffs)]
+    print(f"!! Difference between the two c_t0 vectors: {c_t0_diff}")
+    c_t0_diff_max = max(abs(c) for c in c_t0_diff) if c_t0_diff else 0
+    c_t0_match = (c_t0_diff_max == 0)
+    comparisons.append(('c_t0', c_t0_match, None if c_t0_match else f"Max diff: {c_t0_diff_max}"))
     
-    # Signer's response (final value not sensitive/intermediate values sensitive)
-    match, diff_max, error = compare_vectors(captured.get('z'), reconstructed.get('z'), False)
-    comparisons.append(('z', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    # Signer's response
+    z_captured_coeffs = extract_coefficients(captured.get('z'), reduce_mod_q=True)
+    z_reconstructed_coeffs = extract_coefficients(reconstructed.get('z'), reduce_mod_q=True)
+    z_diff = [a - b for a, b in zip(z_captured_coeffs, z_reconstructed_coeffs)]
+    print(f"!! Difference between the two z vectors: {z_diff}")
+    z_diff_max = max(abs(c) for c in z_diff) if z_diff else 0
+    z_match = (z_diff_max == 0)
+    comparisons.append(('z', z_match, None if z_match else f"Max diff: {z_diff_max}"))
     
     # Hint vector (not sensitive)
-    match, diff_max, error = compare_vectors(captured.get('h'), reconstructed.get('h'), False)
-    comparisons.append(('h', match, error if error else (f"Max diff: {diff_max}" if diff_max else None)))
+    h_captured_coeffs = extract_coefficients(captured.get('h'), reduce_mod_q=False)
+    h_reconstructed_coeffs = extract_coefficients(reconstructed.get('h'), reduce_mod_q=False)
+    h_diff = [a - b for a, b in zip(h_captured_coeffs, h_reconstructed_coeffs)]
+    print(f"!! Difference between the two h vectors: {h_diff}")
+    h_diff_max = max(abs(c) for c in h_diff) if h_diff else 0
+    h_match = (h_diff_max == 0)
+    comparisons.append(('h', h_match, None if h_match else f"Max diff: {h_diff_max}"))
+    
+    # Print comparison results
+    print("\nComparison Results:")
+    print("-" * 70)
+    for name, match, error in comparisons:
+        status = "MATCH" if match else "MISMATCH"
+        print(f"{name:15s}: {status}", end="")
+        if not match and error:
+            print(f" - {error}")
+        elif not match:
+            print(" - Values differ")
+        else:
+            print()
+    print("-" * 70)
     
     all_match = all(c[1] for c in comparisons if c[1] is not None)
     match_count = sum(1 for c in comparisons if c[1] is True)
