@@ -2101,9 +2101,8 @@ class Extract:
                         for k in sorted(keys):
                             to_select = [i for i in size_and_time if i[0] == k]
                             selected = choice(to_select)
-                            time_seconds = selected[1] / 1e9 if isinstance(selected[1], (int, float)) and selected[1] > 1e6 else selected[1]
                             measurements[v_n].write("{0},{1},{2}\n".format(
-                                tuple_num, selected[0], time_seconds))
+                                tuple_num, selected[0], selected[1]))
 
                     values = []
                     times = []

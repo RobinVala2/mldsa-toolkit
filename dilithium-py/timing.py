@@ -30,7 +30,7 @@ def parse_args():
 
     parser.add_argument(
         "--timings", "-t", type=str, default=None,
-        help="File to write timings to (default: {scheme}/results/timings.bin)"
+        help="File to write timings to (default: {scheme}/results/timings.csv)"
     ) 
 
     parser.add_argument(
@@ -89,7 +89,7 @@ def main():
     if args.timings:
         timings_path = Path(args.timings)
     else:
-        timings_path = result_dir / "timings.bin"
+        timings_path = result_dir / "timings.csv"
     
     ml_dsa, sk = load_private_key(key_path)
     scheme = ml_dsa
@@ -108,11 +108,11 @@ def main():
 
     with open(input_path, "rb") as in_fp, \
          open(output_path, "wb") as sig_fp, \
-         open(timings_path, "wb") as time_fp:
+         open(timings_path, "w") as time_fp:
+         time_fp.write("raw times\n")
 
-         messages_processed = 0
 
-         while messages_processed < samples:
+         for i in range(samples):
             data = in_fp.read(block_size)
             if not data or len(data) != block_size:
                 break
@@ -123,18 +123,10 @@ def main():
 
             time_diff = time_after - time_before
             
+            time_fp.write("{0}\n".format(time_diff))
             sig_fp.write(sig)
-            time_fp.write(time_diff.to_bytes(8, sys.byteorder))
 
-            messages_processed += 1
-
-            if messages_processed % 1000 == 0:
-                print(f"{messages_processed} messages processed")
-    
     print("Done.")
-    print(f"Total messages processed: {messages_processed}")
-    print(f"Signatures written to {output_path}")
-    print(f"Timing data written to {timings_path}")
 
 if __name__ == "__main__":
     main()
