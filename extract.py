@@ -1820,24 +1820,40 @@ class Extract:
                 if measurements[i]:
                     measurements[i].close()
     
-    def _extract_vector_coefficients(self, vector):
+    def _extract_vector_coefficients(self, vector, reduce_mod_q=False):
         """
         Extract all coefficients from a vector.
+        If reduce_mod_q is True, reduce coefficients to centered representation [-q/2, q/2].
         """
         coeffs = []
         try:
             m, n = vector.dim() # m - rows, n - columns
+            q = vector.parent.ring.q
             
             if m >= n:
                 for i in range(m):
                     poly = vector[i, 0]
                     for c in poly.coeffs:
-                        coeffs.append(c)
+                        if reduce_mod_q:
+                            # Reduce to centered representation [-q/2, q/2]
+                            c_reduced = c % q
+                            if c_reduced > q // 2:
+                                c_reduced -= q
+                            coeffs.append(c_reduced)
+                        else:
+                            coeffs.append(c)
             else:
                 for j in range(n):
                     poly = vector[0, j]
                     for c in poly.coeffs:
-                        coeffs.append(c)
+                        if reduce_mod_q:
+                            # Reduce to centered representation [-q/2, q/2]
+                            c_reduced = c % q
+                            if c_reduced > q // 2:
+                                c_reduced -= q
+                            coeffs.append(c_reduced)
+                        else:
+                            coeffs.append(c)
 
         except Exception as e:
             print(f"Error extracting vector coefficients: {e}")
@@ -1928,7 +1944,8 @@ class Extract:
         values['bit-size-rho-prime'] = bytesToNumber(rho_prime).bit_length()
         
         # y (secret polynomial vector) - coefficient domain
-        y_coeffs = self._extract_vector_coefficients(y)
+        # reconstructed y from z-c_s1 is in [0, q-1] range)
+        y_coeffs = self._extract_vector_coefficients(y, reduce_mod_q=True)
         values['hw-y'] = sum(bit_count(c) for c in y_coeffs)
         values['bit-size-y'] = sum(abs(c).bit_length() for c in y_coeffs) 
         
