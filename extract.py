@@ -1892,15 +1892,18 @@ class Extract:
         
         pem_content = file_content.decode('ascii')
         return self._parse_pem_ml_dsa_key(pem_content)
-    
-    def _ml_dsa_reconstruct_intermediates(self, scheme, sk, sig, m, ctx=b"", deterministic=True):
+        
+    def _ml_dsa_reconstruct_intermediates(self, scheme, sk, sig, m, ctx=b"", deterministic=True, external_mu=False):
         values = dict()
         
         c_tilde, z, h = scheme._unpack_sig(sig)
         rho, k, tr, s1, s2, t0 = scheme._unpack_sk(sk)
         
-        m_prime = bytes([0]) + bytes([len(ctx)]) + ctx + m
-        mu = scheme._h(tr + m_prime, 64)
+        if external_mu:
+            mu = m
+        else:
+            m_prime = bytes([0]) + bytes([len(ctx)]) + ctx + m
+            mu = scheme._h(tr + m_prime, 64)
         
         if deterministic:
             rnd = bytes([0] * 32)
@@ -1986,6 +1989,17 @@ class Extract:
         w_cs2_low_bits_coeffs = self._extract_vector_coefficients((w-c_s2).low_bits(alpha))
         values['hw-w-cs2-low-bits'] = sum(bit_count(c) for c in w_cs2_low_bits_coeffs)
         values['bit-size-w-cs2-low-bits'] = sum(abs(c).bit_length() for c in w_cs2_low_bits_coeffs)
+
+        # === Infinity norms (max |coeff|) ===
+
+        # ||z||∞
+        z_coeffs = self._extract_vector_coefficients(z, reduce_mod_q=True)
+        values['inf-norm-z'] = max(abs(c) for c in z_coeffs)
+
+        values['inf-norm-y'] = max(abs(c) for c in y_coeffs) 
+
+        r0_coeffs = self._extract_vector_coefficients(r0)
+        values['inf-norm-w0'] = max(abs(c) for c in r0_coeffs) 
         
         return values
     
@@ -2022,6 +2036,10 @@ class Extract:
 
             'hw-w-cs2-low-bits',
             'bit-size-w-cs2-low-bits',
+
+            'inf-norm-z',
+            'inf-norm-y',
+            'inf-norm-w0',
         )
 
         ml_dsa_keys = None
@@ -2077,7 +2095,7 @@ class Extract:
 
                 try:
                     v = self._ml_dsa_reconstruct_intermediates(
-                        scheme, key, signature, message, deterministic=True)
+                        scheme, key, signature, message, deterministic=True, external_mu=True)
                     
                     values.append(v)
                     try:
