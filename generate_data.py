@@ -16,8 +16,7 @@ SCHEMES = {
     "mldsa-87": "ML-DSA-87"
 }
 
-MSG_SIZE = 32
-CHUNK_SIZE = 1024 * 16
+MSG_SIZE = 64
 
 def generate_keys(name: str):
     print(f"Generating keys for {name}")
@@ -39,35 +38,50 @@ def generate_keys(name: str):
 
     print("Done.")
 
-def generate_messages(count: int):
-    total_bytes = count * MSG_SIZE
-    print(f"Generating {count} messages")
+def generate_messages(count, output_file):
+    output_file = Path(output_file)
 
-    with open(DATA_BIN, "wb") as f:
-        left = total_bytes
-        while left > 0:
-            n = min(CHUNK_SIZE, left)
-            f.write(os.urandom(n))
-            left -= n 
-    
-    print(f"Created {DATA_BIN} with size {DATA_BIN.stat().st_size} bytes")
+    print(f"Generating {count} random messages ({MSG_SIZE} bytes each.)")
+
+    with open(output_file, "wb") as f:
+        for i in range(count):
+            f.write(os.urandom(MSG_SIZE))
+            if (i+1) % 1000 == 0:
+                print(f"Generated {i+1}/{count} messages.")
+
+    file_size = output_file.stat().st_size
+    print(f"Done. Wrote {file_size} bytes to {output_file}.")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate ML-DSA keys and random messages for signing")
     parser.add_argument(
-        "--keys", action="store_true", help="Generate ML-DSA keys"
+        "--keys", "-k", 
+        action="store_true", 
+        help="Generate ML-DSA keys"
     )
     parser.add_argument(
-        "--messages", action="store_true", help="Generate random messages"
+        "--messages", "-m", 
+        action="store_true", 
+        help="Generate random messages"
     )
     parser.add_argument(
-        "--scheme", type=str, default="all", 
+        "--scheme", "-s", 
+        type=str, 
+        default="all", 
         choices=["all", "mldsa-44", "mldsa-65", "mldsa-87"], 
         help="Scheme to generate keys for"
     )
     parser.add_argument(
-        "--count", type=int, default=10000,
+        "--count", "-c", 
+        type=int, 
+        default=10000,
         help="Number of messages to generate"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default="messages.bin",
+        help="Output file for messages (default: messages.bin)"
     )
 
     args = parser.parse_args()
@@ -92,7 +106,7 @@ def main():
     
     if args.messages:
         print(f"Starting message generation")
-        generate_messages(args.count)
+        generate_messages(args.count, args.output)
         print("Message generation done")
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--size", type=int, default=32,
+        "--size", type=int, default=64,
         help="Size of messages to sign"
     )
 
@@ -125,6 +125,9 @@ def main():
             
             time_fp.write("{0}\n".format(time_diff))
             sig_fp.write(sig)
+
+            if (i+1) % 1000 == 0:
+                print(f"Processed {i+1}/{samples}")
 
     print("Done.")
 
