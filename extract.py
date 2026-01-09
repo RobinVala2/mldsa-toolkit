@@ -15,10 +15,16 @@ from os.path import join, splitext, getsize, exists
 from collections import defaultdict
 from socket import inet_aton, gethostbyname, gaierror, error
 import multiprocessing as mp
+try:
+    # the Python 3.14 default changed to spawn, which drops global variables
+    # which we need for passing around the data
+    mp.set_start_method('fork', force=True)
+except (RuntimeError, AttributeError):
+    pass
 from threading import Thread, Event
 import hashlib
 import tempfile
-from random import choice
+from random import choice, sample
 import ecdsa
 import pandas as pd
 import numpy as np
@@ -33,18 +39,14 @@ from tlsfuzzer.utils.progress_report import progress_report
 from tlsfuzzer.utils.compat import bit_count
 from tlslite.utils.cryptomath import bytesToNumber, numberToByteArray
 from tlslite.utils.python_key import Python_Key
+from tlsfuzzer.utils.compat import bit_count
+from tlslite.utils.compat import bit_length
 
 try:
     from itertools import izip
 except ImportError: # will be 3.x series
     izip = zip
 
-if sys.version_info >= (3, 10):
-    def bit_count(n):
-        return n.bit_count()
-else:
-    def bit_count(n):
-        return bin(n).count("1")
 
 WAIT_FOR_FIRST_BARE_MAX_VALUE = 0
 WAIT_FOR_NON_BARE_MAX_VALUE = 1
@@ -112,6 +114,12 @@ def help_msg():
     print("                values. Creates separate measurements.csv files")
     print("                for the d, p, q, dP, dQ, and qInv values.")
     print("                Contents must be concatenated PKCS#8 PEM keys.")
+    print(" --ml-kem-keys FILE Analyse the time based on ML-KEM key and")
+    print("                ciphertexts.")
+    print(" --ml-dsa-keys FILE Analyse the time based on ML-DSA private key,")
+    print("                signatures, and messages (reconstruct intermediates).")
+    print(" --ml-dsa-sigs FILE Binary file with concatenated ML-DSA signatures.")
+    print(" --ml-dsa-msgs FILE Binary file with concatenated ML-DSA messages.")
     print(" --workers num  Number of worker processes to use for")
     print("                parallelizable computation. More workers")
     print("                will finish analysis faster, but will require")
@@ -120,18 +128,6 @@ def help_msg():
     print(" --max-bit-size num Override the max bit size used in the creation")
     print("                of the tuples. By default the script will try to")
     print("                calculate it. Used only in the bit size extraction")
-    print(" --ml-kem-keys FILE Read the ML-KEM keys from an external file.")
-    print("                The file must be in binary format.")
-    print("                Used for ML-KEM timing data.")
-    print(" --ml-dsa-keys FILE Read the ML-DSA keys from an external file.")
-    print("                The file must be in binary format.")
-    print("                Used for ML-DSA timing data.")
-    print(" --ml-dsa-sigs FILE Read the ML-DSA signatures from an external file.")
-    print("                The file must be in binary format.")
-    print("                Used for ML-DSA timing data.")
-    print(" --ml-dsa-messages FILE Read the ML-DSA messages from an external file.")
-    print("                The file must be in binary format.")
-    print("                Used for ML-DSA timing data.")
     print(" --verbose      Print's a more verbose output.")
     print(" --help         Display this message")
     print("")
@@ -188,9 +184,10 @@ def main():
     workers = None
     max_bit_size = None
     verbose = False
+    ml_kem_keys = None
     ml_dsa_keys = None
     ml_dsa_sigs = None
-    ml_dsa_messages = None
+    ml_dsa_msgs = None
 
     argv = sys.argv[1:]
 
@@ -207,8 +204,9 @@ def main():
                                 "value-endianness=", "priv-key-ecdsa=",
                                 "clock-frequency=", "hash-func=",
                                 "skip-invert", "workers=", "rsa-keys=",
-                                "max-bit-size=", "verbose", "ml-kem-keys=",
-                                "ml-dsa-keys=", "ml-dsa-sigs=", "ml-dsa-messages="])
+                                "max-bit-size=", "ml-kem-keys=",
+                                "ml-dsa-keys=", "ml-dsa-sigs=", "ml-dsa-msgs=",
+                                "verbose"])
     for opt, arg in opts:
         if opt == '-l':
             logfile = arg
@@ -252,6 +250,14 @@ def main():
             value_endianness = arg
         elif opt == "--rsa-keys":
             rsa_keys = arg
+        elif opt == "--ml-kem-keys":
+            ml_kem_keys = arg
+        elif opt == "--ml-dsa-keys":
+            ml_dsa_keys = arg
+        elif opt == "--ml-dsa-sigs":
+            ml_dsa_sigs = arg
+        elif opt == "--ml-dsa-msgs":
+            ml_dsa_msgs = arg 
         elif opt == "--priv-key-ecdsa":
             priv_key = arg
             if not key_type:
@@ -271,14 +277,6 @@ def main():
             workers = int(arg)
         elif opt == "--max-bit-size":
             max_bit_size = int(arg)
-        elif opt == "--ml-kem-keys":
-            ml_kem_keys = arg
-        elif opt == "--ml-dsa-keys":
-            ml_dsa_keys = arg
-        elif opt == "--ml-dsa-sigs":
-            ml_dsa_sigs = arg
-        elif opt == "--ml-dsa-messages":
-            ml_dsa_messages = arg
         elif opt == "--help":
             help_msg()
             sys.exit(0)
@@ -303,9 +301,9 @@ def main():
         raise ValueError(
             "Only 'little' and 'big' endianess supported")
 
-    if not all([any([logfile, sigs, rsa_keys, values, ml_dsa_keys]), output]):
+    if not all([any([logfile, sigs, rsa_keys, ml_kem_keys, ml_dsa_keys, values]), output]):
         raise ValueError(
-            "Specifying either logfile, rsa keys, raw sigs, raw values, or ml-dsa-keys "
+            "Specifying either logfile, rsa keys, raw sigs or raw values "
             "and output is mandatory")
 
     if capture and not all([logfile, output, ip_address, port]):
@@ -316,10 +314,21 @@ def main():
             "When doing signature extraction, times file, data file, "
             "data size, signatures file and one private key are necessary.")
 
-    if values and not all([values, priv_key, raw_times, data]):
+    if values and not ml_kem_keys and \
+            not all([values, priv_key, raw_times, data]):
         raise ValueError(
             "When doing ECDH secret extraction, times file, data file, "
             "secrets file, and one private key are necessary.")
+
+    if ml_kem_keys and not all([values, raw_times, logfile]):
+        raise ValueError(
+            "When doing ML-KEM secret extraction, raw values, times, "
+            "and logile are necessary.")
+    
+    if ml_dsa_keys and not all([ml_dsa_sigs, ml_dsa_msgs, raw_times]):
+        raise ValueError(
+            "When doing ML-DSA intermediate extraction, raw times, " 
+            "ml-dsa-keys, ml-dsa-sigs, and ml-dsa-msgs are necessary.")
 
     if hash_func_name == None:
         if prehashed:
@@ -347,8 +356,10 @@ def main():
         workers=workers, verbose=verbose, rsa_keys=rsa_keys,
         sig_format=sig_format, values=values, value_size=value_size,
         value_endianness=value_endianness, max_bit_size=max_bit_size,
-        ml_dsa_keys=ml_dsa_keys, ml_dsa_sigs=ml_dsa_sigs,
-        ml_dsa_messages=ml_dsa_messages
+        ml_kem_keys=ml_kem_keys,
+        ml_dsa_keys=ml_dsa_keys,
+        ml_dsa_sigs=ml_dsa_sigs,
+        ml_dsa_msgs=ml_dsa_msgs
     )
     extract.parse()
 
@@ -370,9 +381,83 @@ def main():
 
     if rsa_keys:
         extract.process_rsa_keys()
-    
+
+    if ml_kem_keys:
+        extract.process_ml_kem_keys()
     if ml_dsa_keys:
-        extract.process_ml_dsa_keys()
+        extract.process_ml_dsa_signatures()
+
+
+class LongFormatCSVBlocker(object):
+    """
+    Class to write data into CSV file in long format with automatic blocking.
+
+    Blocking in this context refers to blocks in statistical sense, as in
+    "incomplete block design" of an experiment.
+
+    It will take classified data point by point and then write them out to
+    a file when the amount of data fills up a pre-set window.
+
+    ``duplicate`` specifies the group that must be present and, if there are
+    multiple values in that group, it will write random two of them (used
+    for max bit size of a variable for bit-size analysis)
+    """
+    def __init__(self, filename, window=10, duplicate=None):
+        self.filename = filename
+        self.window = window
+        self._file = open(filename, "w")
+        self.data_points_dropped = 0
+        self._block_no = 0
+        self._data_in_window = defaultdict(list)
+        self._datapoints_in_window = 0
+        self.duplicate = duplicate
+
+    def _write_out_window(self):
+        # write out data only if there's data from at least two groups
+        if len(self._data_in_window) > 1:
+            # when duplicate is specified, write a window only if there is a
+            # value from that group, and provide two measurements from it, if
+            # possible
+            if self.duplicate is not None:
+                if self.duplicate in self._data_in_window:
+                    v = self._data_in_window.pop(self.duplicate)
+                    if len(v) > 1:
+                        self.data_points_dropped += len(v) - 2
+                        # randomise the order when there are two values too
+                        v = sample(v, 2)
+                    for i in v:
+                        self._file.write("{0},{1},{2}\n".format(
+                            self._block_no, self.duplicate, i))
+                else:
+                    # when the baseline is missing, drop all measurements
+                    # from the window
+                    self.data_points_dropped += self._datapoints_in_window
+                    self._data_in_window = defaultdict(list)
+                    self._datapoints_in_window = 0
+                    return
+
+            for k, v in self._data_in_window.items():
+                self.data_points_dropped += len(v) - 1
+                selected = choice(v)
+                self._file.write("{0},{1},{2}\n".format(
+                    self._block_no, k, selected))
+            self._block_no += 1
+        else:
+            self.data_points_dropped += self._datapoints_in_window
+
+        self._data_in_window = defaultdict(list)
+        self._datapoints_in_window = 0
+
+    def add(self, group, value):
+        self._data_in_window[group].append(value)
+        self._datapoints_in_window += 1
+        if self._datapoints_in_window >= self.window:
+            self._write_out_window()
+
+    def close(self):
+        """Write out any left over data and close the file."""
+        self._write_out_window()
+        self._file.close()
 
 
 class Extract:
@@ -388,8 +473,7 @@ class Extract:
                  hash_func=hashlib.sha256, workers=None, verbose=False,
                  fin_as_resp=False, rsa_keys=None, sig_format="DER",
                  values=None, value_size=None, value_endianness="little",
-                 max_bit_size=None, ml_dsa_keys=None, ml_dsa_sigs=None,
-                 ml_dsa_messages=None):
+                 max_bit_size=None, ml_kem_keys=None, ml_dsa_keys=None, ml_dsa_sigs=None, ml_dsa_msgs=None):
         """
         Initialises instance and sets up class name generator from log.
 
@@ -477,9 +561,10 @@ class Extract:
         self.value_size = value_size
         self.value_endianness = value_endianness
         self.max_bit_size = max_bit_size
+        self.ml_kem_keys = ml_kem_keys
         self.ml_dsa_keys = ml_dsa_keys
         self.ml_dsa_sigs = ml_dsa_sigs
-        self.ml_dsa_messages = ml_dsa_messages
+        self.ml_dsa_msgs = ml_dsa_msgs
 
         if sig_format not in ["DER", "RAW"]:
             raise ValueError(
@@ -1819,58 +1904,209 @@ class Extract:
             for i in value_names:
                 if measurements[i]:
                     measurements[i].close()
-    
-    def _extract_vector_coefficients(self, vector, reduce_mod_q=False):
+
+    def _parse_pem_ml_kem_key(self, dk_pem):
+        from kyber_py.ml_kem.pkcs import dk_from_pem
+
+        kem, dk, _, _ = dk_from_pem(dk_pem)
+
+        return kem, dk
+
+    def _read_ml_kem_key(self, file):
+        lines = []
+        while True:
+            line = file.readline()
+            # empty line still has '\n', only EOF is an empty string
+            if not line:
+                return None
+            line = line.strip()
+            if line == "-----BEGIN PRIVATE KEY-----":
+                lines.append(line)
+                break
+        while True:
+            line = file.readline()
+            if not line:
+                raise ValueError("Truncated private key file!")
+            line = line.strip()
+            if line == "-----BEGIN PRIVATE KEY-----":
+                raise ValueError("Inconsistent private key file!")
+            lines.append(line)
+            if line == "-----END PRIVATE KEY-----":
+                break
+
+        one_pem_key = "\n".join(lines)
+
+        return self._parse_pem_ml_kem_key(one_pem_key)
+
+    def _ml_kem_k_pke_decrypt_with_intermediates(self, kem, dk_pke, c, values):
+        n = kem.k * kem.du * 32
+        c1, c2 = c[:n], c[n:]
+
+        u = kem.M.decode_vector(c1, kem.k, kem.du).decompress(kem.du)
+        v = kem.R.decode(c2, kem.dv).decompress(kem.dv)
+        s_hat = kem.M.decode_vector(dk_pke, kem.k, 12, is_ntt=True)
+
+        u_hat = u.to_ntt()
+        s_hat_dot_u_hat = s_hat.dot(u_hat)
+        values['hw-s-hat-dot-u-hat'] = sum(bit_count(i) for i in s_hat_dot_u_hat.coeffs)
+        values['bit-size-s-hat-dot-u-hat'] = sum(bit_length(i) for i in s_hat_dot_u_hat)
+        w = v - (s_hat_dot_u_hat).from_ntt()
+
+        #print("====================")
+        #print(dir(w))
+        #print(w.coeffs)
+        #print(sum(i == 0 for i in w.coeffs))
+        #print(sum(i >= 3329 for i in w.coeffs))
+        values['hw-w'] = sum(bit_count(i) for i in w.coeffs)
+        values['bit-size-w'] = sum(bit_length(i) for i in w.coeffs)
+        values['bit-size-min-w'] = min(bit_length(i) for i in w.coeffs)
+
+        m = w.compress(1).encode(1)
+
+        return m
+
+    def _ml_kem_decaps_with_intermediates(self, kem, dk, c):
         """
-        Extract all coefficients from a vector.
-        If reduce_mod_q is True, reduce coefficients to centered representation [-q/2, q/2].
+        Perform ML-KEM decapsulation, return also metadata about intermediate
+        values of the algorithm.
         """
-        coeffs = []
+        values = dict()
+
+        if len(c) != 32 * (kem.du * kem.k + kem.dv):
+            raise ValueError("wrong ciphertext length")
+        if len(dk) != kem._dk_size():
+            raise ValueError("wrong decapsulation key length")
+
+        dk_pke = dk[0:384 * kem.k]
+        ek_pke = dk[384 * kem.k : 768 * kem.k + 32]
+        h = dk[768 * kem.k + 32 : 768 * kem.k + 64]
+        z = dk[768 * kem.k + 64 :]
+        m_prime = self._ml_kem_k_pke_decrypt_with_intermediates(
+            kem, dk_pke, c, values)
+
+        values['hw-m-prime'] = bit_count(bytesToNumber(m_prime))
+
+        K_prime, r_prime = kem._G(m_prime + h)
+
+        values['hw-r-prime'] = bit_count(bytesToNumber(r_prime))
+
+        K_bar = kem._J(z + c)
+
+        c_prime = kem._k_pke_encrypt(ek_pke, m_prime, r_prime)
+
+        values['hw-c-prime'] = bit_count(bytesToNumber(c_prime))
+
+        values['hd-c-c-prime'] = bit_count(bytesToNumber(c) ^ bytesToNumber(c_prime))
+
+        for i, a, b in zip(range(len(c)), c, c_prime):
+            if a != b:
+                break
+        else:
+            i = -1
+        values['first-diff-c-c-prime'] = i
+        diff = -1
+        for i, a, b in zip(range(len(c)), c, c_prime):
+            if a != b:
+                diff = i
+        values['last-diff-c-c-prime'] = diff
+
+        if c == c_prime:
+            return K_prime, values
+        else:
+            return K_bar, values
+
+    def process_ml_kem_keys(self):
+        ml_kem_keys = None
+        ciphertexts = None
+        measurements = dict((i, None) for i in value_names)
+
+        times_iterator = self._get_time_from_file()
+
+        progress = None
+
         try:
-            m, n = vector.dim() # m - rows, n - columns
-            q = vector.parent.ring.q
-            
-            if m >= n:
-                for i in range(m):
-                    poly = vector[i, 0]
-                    for c in poly.coeffs:
-                        if reduce_mod_q:
-                            # Reduce to centered representation [-q/2, q/2]
-                            c_reduced = c % q
-                            if c_reduced > q // 2:
-                                c_reduced -= q
-                            coeffs.append(c_reduced)
-                        else:
-                            coeffs.append(c)
-            else:
-                for j in range(n):
-                    poly = vector[0, j]
-                    for c in poly.coeffs:
-                        if reduce_mod_q:
-                            # Reduce to centered representation [-q/2, q/2]
-                            c_reduced = c % q
-                            if c_reduced > q // 2:
-                                c_reduced -= q
-                            coeffs.append(c_reduced)
-                        else:
-                            coeffs.append(c)
+            ml_kem_keys = open(self.ml_kem_keys, "rt")
 
-        except Exception as e:
-            print(f"Error extracting vector coefficients: {e}")
-            return []
+            kem, key = self._read_ml_kem_key(ml_kem_keys)
 
-        return coeffs
-    
+            value_size = 32 * (kem.du * kem.k + kem.dv)
+
+            # names of statistics we are collecting together with the
+            # parameters for how the blocking window should be done
+            value_names = {
+                'hw-m-prime': {'window': 17},
+                'hw-r-prime': {'window': 17},
+                'hw-w': {'window': 30},
+                'bit-size-w': {'window': 30},  # a _sum_ of bit sizes
+                'hw-s-hat-dot-u-hat': {'window': 30},
+                'bit-size-s-hat-dot-u-hat': {'window': 30},  # sum of bit sizes
+                'bit-size-min-w': {'window': 5, 'duplicate': 0},
+                'hw-c-prime': {'window': 30},
+                'hd-c-c-prime': {'window': 17},  # uncertain
+                'first-diff-c-c-prime': {'window': 5, 'duplicate': 0},
+                'last-diff-c-c-prime': {'window': 5, 'duplicate': value_size-1},
+            }
+
+            for i, k in value_names.items():
+                f_name = join(self.output, "measurements-{0}.csv".format(i))
+                measurements[i] = LongFormatCSVBlocker(f_name, **k)
+
+            ciphertexts = open(self.values, "rb")
+
+            ciphertexts.seek(0, 2)
+            exp_len = ciphertexts.tell()
+            ciphertexts.seek(0, 0)
+            status = [0, exp_len, Event()]
+            if self.verbose:
+                kwargs = {}
+                kwargs['unit'] = 'B'
+                kwargs['prefix'] = 'binary'
+                kwargs['delay'] = self.delay
+                kwargs['end'] = self.carriage_return
+                progress = Thread(target=progress_report, args=(status,),
+                                  kwargs=kwargs)
+                progress.start()
+
+            while True:
+                ciphertext = ciphertexts.read(value_size)
+                status[0] = ciphertexts.tell()
+
+                if not ciphertext:
+                    break
+                else:
+                    ss, v = self._ml_kem_decaps_with_intermediates(
+                        kem, key, ciphertext)
+
+                    # TODO compare the the gotten shared secret with the
+                    # expected value
+
+                    v_time = next(times_iterator)
+                    for v_k, v_v in v.items():
+                        measurements[v_k].add(v_v, v_time)
+        finally:
+            status[2].set()
+            if self.verbose:
+                progress.join()
+            print()
+
+            if ml_kem_keys:
+                ml_kem_keys.close()
+            if ciphertexts:
+                ciphertexts.close()
+
+            for i in measurements.values():
+                if i:
+                    i.close()
     
     def _parse_pem_ml_dsa_key(self, sk_pem):
+
         from dilithium_py.ml_dsa.pkcs import sk_from_pem
         from dilithium_py.ml_dsa.ml_dsa import ML_DSA
         from dilithium_py.ml_dsa.default_parameters import DEFAULT_PARAMETERS
-        
+
         _, sk, _, _ = sk_from_pem(sk_pem)
-        
+
         sk_size = len(sk)
-        
         if sk_size == 2560:
             scheme = ML_DSA(DEFAULT_PARAMETERS["ML_DSA_44"])
         elif sk_size == 4032:
@@ -1878,11 +2114,14 @@ class Extract:
         elif sk_size == 4896:
             scheme = ML_DSA(DEFAULT_PARAMETERS["ML_DSA_87"])
         else:
-            raise ValueError(f"Unknown key size {sk_size} bytes. Expected 2560 (ML-DSA-44), 4032 (ML-DSA-65), or 4896 (ML-DSA-87)")
+            raise ValueError(
+                "Unknown ML-DSA private key size> {0} bytes".format(sk_size)
+            )
         
         return scheme, sk
     
     def _read_ml_dsa_key(self, file):
+
         file_content = file.read()
         if not file_content:
             return None
@@ -1892,255 +2131,325 @@ class Extract:
         
         pem_content = file_content.decode('ascii')
         return self._parse_pem_ml_dsa_key(pem_content)
+
+    def _iter_vector_coeffs(self, vector, centered=False, q=None):
         
-    def _ml_dsa_reconstruct_intermediates(self, scheme, sk, sig, m, ctx=b"", deterministic=True, external_mu=False):
-        values = dict()
+        m, n = vector.dim()
+        if centered and q is None:
+            q = vector.parent.ring.q
         
-        c_tilde, z, h = scheme._unpack_sig(sig)
+        if m >= n:
+            for i in range(m):
+                poly = vector[i,0]
+                for c in poly.coeffs:
+                    if centered:
+                        c = c % q
+                        if c > q // 2:
+                            c -= q
+                    yield int (c)
+        else: 
+            for j in range(n):
+                poly = vector[0,j]
+                for c in poly.coeffs:
+                    if centered:
+                        c = c % q
+                        if c > q // 2:
+                            c -= q
+                    yield int(c)
+
+    def _prepare_ml_dsa_context(self, scheme, sk):
         rho, k, tr, s1, s2, t0 = scheme._unpack_sk(sk)
-        
+
+        ctx = {
+            "scheme": scheme,
+            "sk": sk,
+            "rho": rho,
+            "k": k,
+            "tr": tr,
+            "s1": s1,
+            "s2": s2,
+            "s1_hat": s1.to_ntt(),
+            "s2_hat": s2.to_ntt(),
+            "t0_hat": t0.to_ntt(),
+            "A_hat": scheme._expand_matrix_from_seed(rho),
+            "q": s1.parent.ring.q,
+        }
+        return ctx
+    
+    def _ml_dsa_reconstruct_intermediates(
+        self, ctx, sig, msg, external_mu=False, deterministic=True, ctx_bytes = b""
+    ):
+        scheme = ctx["scheme"]
+        rho = ctx["rho"]
+        k = ctx["k"]
+        tr = ctx["tr"]
+        A_hat = ctx["A_hat"]
+        s1_hat = ctx["s1_hat"]
+        s2_hat = ctx["s2_hat"]
+        q = ctx["q"]
+
+        values = {}
+
+        c_tilde, z, _h = scheme._unpack_sig(sig)
+
         if external_mu:
-            mu = m
+            mu = msg
         else:
-            m_prime = bytes([0]) + bytes([len(ctx)]) + ctx + m
+            m_prime = bytes([0]) + bytes([len(ctx_bytes)]) + ctx_bytes + msg
             mu = scheme._h(tr + m_prime, 64)
         
         if deterministic:
-            rnd = bytes([0] * 32)
+            rnd = bytes([0]*32)
             rho_prime = scheme._h(k + rnd + mu, 64)
         else:
-            rnd = None
             rho_prime = None
         
         c = scheme.R.sample_in_ball(c_tilde, scheme.tau)
-        
         c_hat = c.to_ntt()
-        s1_hat = s1.to_ntt()
-        s2_hat = s2.to_ntt()
-        t0_hat = t0.to_ntt()
-        
+
+        # y = z - cs1
         c_s1_hat = s1_hat.scale(c_hat)
         c_s1 = c_s1_hat.from_ntt()
-        
-        # Reconstruct y: z = y + c·s1, therefore y = z - c·s1
         y = z - c_s1
-        
-        # Reconstruct w = Ay (from y)
-        A_hat = scheme._expand_matrix_from_seed(rho)
+
+        # w = A*y
         y_hat = y.to_ntt()
-        w_hat = A_hat @ y_hat  # NTT domain representation of w
+        w_hat = A_hat @ y_hat
         w = w_hat.from_ntt()
-        
+
         alpha = scheme.gamma_2 << 1
-        w1 = w.high_bits(alpha)
-        
+        # r0 = low_bits(w-cs2)
         c_s2_hat = s2_hat.scale(c_hat)
         c_s2 = c_s2_hat.from_ntt()
+        r0 = (w-c_s2).low_bits(alpha)
+
+        # === Features ===
+        if rho_prime is not None:
+            values["hw-rho-prime"] = bit_count(bytesToNumber(rho_prime))
+            values["bit-size-rho-prime"] = bit_length(bytesToNumber(rho_prime))
         
-        r0 = (w - c_s2).low_bits(alpha)
-        
-        c_t0_hat = t0_hat.scale(c_hat)
-        c_t0 = c_t0_hat.from_ntt()
+        # y coeff domain
+        y_hw = 0
+        y_bits = 0
+        y_inf = 0
+        for c0 in self._iter_vector_coeffs(y):
+            ac = abs(c0)
+            y_hw += bit_count(c0)
+            y_bits += bit_length(ac)
+            if ac > y_inf:
+                y_inf = ac
+        values["hw-y"] = y_hw
+        values["bit-size-y"] = y_bits
+        values["inf-norm-y"] = y_inf
 
-        # rho_prime (private random seed)
-        values['hw-rho-prime'] = bit_count(bytesToNumber(rho_prime))
-        values['bit-size-rho-prime'] = bytesToNumber(rho_prime).bit_length()
-        
-        # y (secret polynomial vector) - coefficient domain
-        # reconstructed y from z-c_s1 is in [0, q-1] range)
-        y_coeffs = self._extract_vector_coefficients(y, reduce_mod_q=True)
-        values['hw-y'] = sum(bit_count(c) for c in y_coeffs)
-        values['bit-size-y'] = sum(abs(c).bit_length() for c in y_coeffs) 
-        
-        # y (secret polynomial vector) - NTT domain
-        y_hat_coeffs = self._extract_vector_coefficients(y_hat)
-        values['ntt-hw-y'] = sum(bit_count(c) for c in y_hat_coeffs)
-        values['ntt-bit-size-y'] = sum(abs(c).bit_length() for c in y_hat_coeffs)
-        
-        # w (commitment polynomial vector) - coefficient domain
-        w_coeffs = self._extract_vector_coefficients(w)
-        values['hw-w'] = sum(bit_count(c) for c in w_coeffs)
-        values['bit-size-w'] = sum(abs(c).bit_length() for c in w_coeffs) 
-        
-        # w (commitment polynomial vector) - NTT domain
-        w_hat_coeffs = self._extract_vector_coefficients(w_hat)
-        values['ntt-hw-w'] = sum(bit_count(c) for c in w_hat_coeffs)
-        values['ntt-bit-size-w'] = sum(abs(c).bit_length() for c in w_hat_coeffs)
+        # y NTT domain
+        y_ntt_hw = 0
+        y_ntt_bits = 0
+        for c0 in self._iter_vector_coeffs(y_hat):
+            ac = abs(c0)
+            y_ntt_hw += bit_count(c0)
+            y_ntt_bits += bit_length(ac)
+        values["ntt-hw-y"] = y_ntt_hw
+        values["ntt-bit-size-y"] = y_ntt_bits
 
-        # c_s1 (Used for computation of signer's response) - coefficient domain
-        c_s1_coeffs = self._extract_vector_coefficients(c_s1)
-        values['hw-c-s1'] = sum(bit_count(c) for c in c_s1_coeffs) 
-        values['bit-size-c-s1'] = sum(abs(c).bit_length() for c in c_s1_coeffs) 
+        # w coeff domain
+        w_hw = 0
+        w_bits = 0
+        for c0 in self._iter_vector_coeffs(w):
+            ac = abs(c0)
+            w_hw += bit_count(c0)
+            w_bits += bit_length(ac)
+        values["hw-w"] = w_hw
+        values["bit-size-w"] = w_bits
 
-        c_s1_hat_coeffs = self._extract_vector_coefficients(c_s1_hat)
-        values['ntt-hw-c-s1'] = sum(bit_count(c) for c in c_s1_hat_coeffs)
-        values['ntt-bit-size-c-s1'] = sum(abs(c).bit_length() for c in c_s1_hat_coeffs)
-        
-        # c_s2 (Used for computation of r0) - coefficient domain
-        c_s2_coeffs = self._extract_vector_coefficients(c_s2)
-        values['hw-c-s2'] = sum(bit_count(c) for c in c_s2_coeffs) 
-        values['bit-size-c-s2'] = sum(abs(c).bit_length() for c in c_s2_coeffs) 
+        # w NTT domain
+        w_ntt_hw = 0
+        w_ntt_bits = 0
+        for c0 in self._iter_vector_coeffs(w_hat):
+            ac = abs(c0)
+            w_ntt_hw += bit_count(c0)
+            w_ntt_bits += bit_length(ac)
+        values["ntt-hw-w"] = w_ntt_hw
+        values["ntt-bit-size-w"] = w_ntt_bits
 
-        c_s2_hat_coeffs = self._extract_vector_coefficients(c_s2_hat)
-        values['ntt-hw-c-s2'] = sum(bit_count(c) for c in c_s2_hat_coeffs)
-        values['ntt-bit-size-c-s2'] = sum(abs(c).bit_length() for c in c_s2_hat_coeffs)
+        # c*s1 coeff and NTT
+        cs1_hw = 0
+        cs1_bits = 0
+        for c0 in self._iter_vector_coeffs(c_s1):
+            ac = abs(c0)
+            cs1_hw += bit_count(c0)
+            cs1_bits += bit_length(ac)
+        values["hw-c-s1"] = cs1_hw
+        values["bit-size-c-s1"] = cs1_bits
 
-        # w_cs2_low_bits: r0 = (w - c_s2).low_bits(alpha)
-        w_cs2_low_bits_coeffs = self._extract_vector_coefficients((w-c_s2).low_bits(alpha))
-        values['hw-w-cs2-low-bits'] = sum(bit_count(c) for c in w_cs2_low_bits_coeffs)
-        values['bit-size-w-cs2-low-bits'] = sum(abs(c).bit_length() for c in w_cs2_low_bits_coeffs)
+        cs1_ntt_hw = 0
+        cs1_ntt_bits = 0
+        for c0 in self._iter_vector_coeffs(c_s1_hat):
+            ac = abs(c0)
+            cs1_ntt_hw += bit_count(c0)
+            cs1_ntt_bits += bit_length(ac)
+        values["ntt-hw-c-s1"] = cs1_ntt_hw
+        values["ntt-bit-size-c-s1"] = cs1_ntt_bits
 
-        # === Infinity norms (max |coeff|) ===
+        # c*s2 coeff and NTT
+        cs2_hw = 0
+        cs2_bits = 0
+        for c0 in self._iter_vector_coeffs(c_s2):
+            ac = abs(c0)
+            cs2_hw += bit_count(c0)
+            cs2_bits += bit_length(ac)
+        values["hw-c-s2"] = cs2_hw
+        values["bit-size-c-s2"] = cs2_bits
 
-        # ||z||∞
-        z_coeffs = self._extract_vector_coefficients(z, reduce_mod_q=True)
-        values['inf-norm-z'] = max(abs(c) for c in z_coeffs)
+        cs2_ntt_hw = 0
+        cs2_ntt_bits = 0
+        for c0 in self._iter_vector_coeffs(c_s2_hat):
+            ac = abs(c0)
+            cs2_ntt_hw += bit_count(c0)
+            cs2_ntt_bits += bit_length(ac)
+        values["ntt-hw-c-s2"] = cs2_ntt_hw
+        values["ntt-bit-size-c-s2"] = cs2_ntt_bits       
 
-        values['inf-norm-y'] = max(abs(c) for c in y_coeffs) 
+        # (w - c*s2).low_bits(alpha)
+        w0_hw = 0
+        w0_bits = 0
+        w0_inf = 0
+        for c0 in self._iter_vector_coeffs(r0):
+            ac = abs(c0)
+            w0_hw += bit_count(c0)
+            w0_bits += bit_length(ac)
+            if ac > w0_inf:
+                w0_inf = ac
+        values["hw-w-cs2-low-bits"] = w0_hw
+        values["bit-size-w-cs2-low-bits"] = w0_bits
+        values["inf-norm-w0"] = w0_inf
 
-        r0_coeffs = self._extract_vector_coefficients(r0)
-        values['inf-norm-w0'] = max(abs(c) for c in r0_coeffs) 
-        
+        # ||z||_inf
+        z_inf = 0
+        for c0 in self._iter_vector_coeffs(z):
+            ac = abs(c0)
+            if ac > z_inf:
+                z_inf = ac
+        values["inf-norm-z"] = z_inf
+
         return values
-    
-    def process_ml_dsa_keys(self):
-        values = []
-        times = []
-        max_len = 20
 
-        tuple_num = 0
+    def process_ml_dsa_signatures(self):
 
-        value_names = (
-            'hw-rho-prime',
-            'bit-size-rho-prime',
-
-            'hw-y',
-            'bit-size-y',
-            'ntt-hw-y',
-            'ntt-bit-size-y',
-
-            'hw-w',
-            'bit-size-w',
-            'ntt-hw-w',
-            'ntt-bit-size-w',
-
-            'hw-c-s1',
-            'bit-size-c-s1',
-            'ntt-hw-c-s1',
-            'ntt-bit-size-c-s1',
-
-            'hw-c-s2',
-            'bit-size-c-s2',
-            'ntt-hw-c-s2',
-            'ntt-bit-size-c-s2',
-
-            'hw-w-cs2-low-bits',
-            'bit-size-w-cs2-low-bits',
-
-            'inf-norm-z',
-            'inf-norm-y',
-            'inf-norm-w0',
-        )
+        if not self.ml_dsa_keys or not self.ml_dsa_sigs or not self.ml_dsa_msgs:
+            raise ValueError("Missing ML-DSA inputs (keys/sigs/msgs).")
 
         ml_dsa_keys = None
-        signatures = None
-        messages = None
-        measurements = dict((i, None) for i in value_names)
+        sigs_fp = None
+        msgs_fp = None
+        measurements = {}
 
         times_iterator = self._get_time_from_file()
+        progress = None
+
+        value_names = {
+            "hw-rho-prime": {"window": 17},
+            "bit-size-rho-prime": {"window": 17},
+            "hw-y": {"window": 30},
+            "bit-size-y": {"window": 30},
+            "ntt-hw-y": {"window": 30},
+            "ntt-bit-size-y": {"window": 30},
+            "hw-w": {"window": 30},
+            "bit-size-w": {"window": 30},
+            "ntt-hw-w": {"window": 30},
+            "ntt-bit-size-w": {"window": 30},
+            "hw-c-s1": {"window": 30},
+            "bit-size-c-s1": {"window": 30},
+            "ntt-hw-c-s1": {"window": 30},
+            "ntt-bit-size-c-s1": {"window": 30},
+            "hw-c-s2": {"window": 30},
+            "bit-size-c-s2": {"window": 30},
+            "ntt-hw-c-s2": {"window": 30},
+            "ntt-bit-size-c-s2": {"window": 30},
+            "hw-w-cs2-low-bits": {"window": 30},
+            "bit-size-w-cs2-low-bits": {"window": 30},
+            "inf-norm-z": {"window": 5},
+            "inf-norm-y": {"window": 5},
+            "inf-norm-w0": {"window": 5},
+        }
 
         try:
             ml_dsa_keys = open(self.ml_dsa_keys, "rb")
-            
-            for i in value_names:
-                f_name = join(self.output, f"measurements-{i}.csv")
-                measurements[i] = open(f_name, "wt")
+            scheme, sk = self._read_ml_dsa_key(ml_dsa_keys)
+            if not scheme:
+                raise ValueError("No ML-DSA key found in ml-dsa-keys file.")
 
-            scheme, key = self._read_ml_dsa_key(ml_dsa_keys)
+            ctx = self._prepare_ml_dsa_context(scheme, sk)
 
-            sk_size = len(key)
+            sk_size = len(sk)
             if sk_size == 2560:
-                sig_size = 2420  # ML-DSA-44
+                sig_size = 2420
             elif sk_size == 4032:
-                sig_size = 3309  # ML-DSA-65
+                sig_size = 3309
             elif sk_size == 4896:
-                sig_size = 4627  # ML-DSA-87
+                sig_size = 4627
             else:
-                raise ValueError(f"Unknown key size {sk_size} bytes. Expected 2560 (ML-DSA-44), 4032 (ML-DSA-65), or 4896 (ML-DSA-87)")
+                raise ValueError("Unknown ML-DSA key size: {0}".format(sk_size))
 
-            signatures = open(self.ml_dsa_sigs, "rb")
-            def read_signature():
-                sig_bytes = signatures.read(sig_size)
-                if not sig_bytes:
-                    return None
-                if len(sig_bytes) != sig_size:
-                    return None
-                return sig_bytes
-            
-            MSG_SIZE = 32
-            messages = open(self.ml_dsa_messages, "rb") if self.ml_dsa_messages else None
+            msg_size = self.data_size if self.data_size else 32
+
+            for name, params in value_names.items():
+                f_name = join(self.output, "measurements-{0}.csv".format(name))
+                measurements[name] = LongFormatCSVBlocker(f_name, **params)
+
+            sigs_fp = open(self.ml_dsa_sigs, "rb")
+            msgs_fp = open(self.ml_dsa_msgs, "rb")
+
+
+            sigs_fp.seek(0, 2)
+            exp_len = sigs_fp.tell()
+            sigs_fp.seek(0, 0)
+            status = [0, exp_len, Event()]
+            if self.verbose:
+                kwargs = {"unit": "B", "prefix": "binary", "delay": self.delay,
+                          "end": self.carriage_return}
+                progress = Thread(target=progress_report, args=(status,),
+                                  kwargs=kwargs)
+                progress.start()
 
             while True:
-                signature = read_signature()
-                if not signature or len(signature) == 0:
+                sig = sigs_fp.read(sig_size)
+                status[0] = sigs_fp.tell()
+
+                if not sig:
                     break
-                
-                if len(signature) < sig_size:
-                    continue
-
-                if messages:
-                    message = messages.read(MSG_SIZE)
-                    if len(message) < MSG_SIZE:
-                        break
-
-                try:
-                    v = self._ml_dsa_reconstruct_intermediates(
-                        scheme, key, signature, message, deterministic=True, external_mu=True)
-                    
-                    values.append(v)
-                    try:
-                        time_val = next(times_iterator)
-                        times.append(time_val)
-                    except StopIteration:
-                        if self.verbose:
-                            print(f"Warning: Ran out of timing data at signature {len(values)}")
-                        break
-                except Exception as e:
-                    if self.verbose:
-                        print(f"Warning: Failed to process signature: {e}")
-                    continue
-
-                if len(values) >= max_len:
-                    for v_n in value_names:
-                        keys = set(v[v_n] for v in values)
-                        size_and_time = sorted(zip(
-                            (v[v_n] for v in values), times))
-
-                        for k in sorted(keys):
-                            to_select = [i for i in size_and_time if i[0] == k]
-                            selected = choice(to_select)
-                            measurements[v_n].write("{0},{1},{2}\n".format(
-                                tuple_num, selected[0], selected[1]))
-
-                    values = []
-                    times = []
-                    tuple_num += 1
-
-                if not signature or len(signature) == 0:
+                if len(sig) != sig_size:
                     break
+
+                msg = msgs_fp.read(msg_size)
+                if not msg or len(msg) != msg_size:
+                    break
+
+                feats = self._ml_dsa_reconstruct_intermediates(
+                    ctx, sig, msg, external_mu=True, deterministic=True
+                )
+
+                v_time = next(times_iterator)
+                for k_name, v_val in feats.items():
+                    if k_name in measurements:
+                        measurements[k_name].add(v_val, v_time)
 
         finally:
+            status[2].set()
+            if self.verbose():
+                progress.join()
+            print()
+
             if ml_dsa_keys:
                 ml_dsa_keys.close()
-            if signatures:
-                signatures.close()
-            if messages:
-                messages.close()
+            if sigs_fp:
+                sigs_fp.close()
+            if msgs_fp:
+                msgs_fp.close()
 
-            for i in value_names:
-                if measurements[i]:
-                    measurements[i].close()
+            for i in measurements.values():
+                if i:
+                    i.close()
 
 if __name__ == '__main__':
     main()
-
