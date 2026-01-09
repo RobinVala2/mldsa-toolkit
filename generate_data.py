@@ -16,7 +16,7 @@ SCHEMES = {
     "mldsa-87": "ML-DSA-87"
 }
 
-MSG_SIZE = 64
+# MSG_SIZE = 64
 
 def generate_keys(name: str):
     print(f"Generating keys for {name}")
@@ -38,14 +38,14 @@ def generate_keys(name: str):
 
     print("Done.")
 
-def generate_messages(count, output_file):
+def generate_messages(count, output_file, msg_size):
     output_file = Path(output_file)
 
-    print(f"Generating {count} random messages ({MSG_SIZE} bytes each.)")
+    print(f"Generating {count} random messages ({msg_size} bytes each.)")
 
     with open(output_file, "wb") as f:
         for i in range(count):
-            f.write(os.urandom(MSG_SIZE))
+            f.write(os.urandom(msg_size))
             if (i+1) % 1000 == 0:
                 print(f"Generated {i+1}/{count} messages.")
 
@@ -53,7 +53,9 @@ def generate_messages(count, output_file):
     print(f"Done. Wrote {file_size} bytes to {output_file}.")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate ML-DSA keys and random messages for signing")
+    parser = argparse.ArgumentParser(
+        description="Generate ML-DSA keys and random messages for signing"
+    )
     parser.add_argument(
         "--keys", "-k", 
         action="store_true", 
@@ -63,6 +65,12 @@ def parse_args():
         "--messages", "-m", 
         action="store_true", 
         help="Generate random messages"
+    )
+    parser.add_argument(
+        "--size", 
+        type=int,
+        default=32,
+        help="Size of the message"
     )
     parser.add_argument(
         "--scheme", "-s", 
@@ -106,7 +114,7 @@ def main():
     
     if args.messages:
         print(f"Starting message generation")
-        generate_messages(args.count, args.output)
+        generate_messages(args.count, args.output, args.size)
         print("Message generation done")
 
 if __name__ == "__main__":

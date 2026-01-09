@@ -16,41 +16,53 @@ SCHEMES = {
 }
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Measure ML-DSA signing times of dilithium-py")
-
+    parser = argparse.ArgumentParser(
+        description="Measure ML-DSA signing times of dilithium-py"
+    )
     parser.add_argument(
-        "--input", "-i", type=str, required=True,
+        "--input", "-i", 
+        type=str, 
+        required=True,
         help="Input file containing messages to sign"
     )
-
     parser.add_argument(
-        "--output", "-o", type=str, default=None,
-        help="File to write signatures to (default: {scheme}/results/signatures.bin)"
+        "--output", "-o", 
+        type=str, 
+        default=None,
+        help="File to write signatures to "
+        "(default: {scheme}/results/signatures.bin)"
     )
-
     parser.add_argument(
-        "--timings", "-t", type=str, default=None,
-        help="File to write timings to (default: {scheme}/results/timings.csv)"
+        "--timings", "-t", 
+        type=str, 
+        default=None,
+        help="File to write timings to "
+        "(default: {scheme}/results/timings.csv)"
     ) 
-
     parser.add_argument(
-        "--scheme", "-s", type=str, required=True,
+        "--scheme", "-s", 
+        type=str, 
+        required=True,
         choices=["mldsa-44", "mldsa-65", "mldsa-87"],
         help="ML-DSA scheme to use"
     )                 
-
     parser.add_argument(
-        "--key", "-k", type=str, default=None,
-        help="Path to private key file (default: {scheme}/keys/sk.pem)"
+        "--key", "-k", 
+        type=str, 
+        default=None,
+        help="Path to private key file "
+        "(default: {scheme}/keys/sk.pem)"
     )
-
     parser.add_argument(
-        "--size", type=int, default=64,
+        "--size", 
+        type=int, 
+        default=32,
         help="Size of messages to sign"
     )
-
     parser.add_argument(
-        "--samples", "-n", type=int, default=None,
+        "--samples", "-n", 
+        type=int, 
+        default=None,
         help="Number of messages to sign"
     )
 
