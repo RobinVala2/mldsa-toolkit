@@ -2235,7 +2235,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(y):
             ac = abs(c0)
             y_hw += bit_count(c0)
-            y_bits += bit_length(ac)
+            y_bits += bit_length(c0)
             if ac > y_inf:
                 y_inf = ac
         values["hw-y"] = y_hw
@@ -2248,7 +2248,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(y_hat):
             ac = abs(c0)
             y_ntt_hw += bit_count(c0)
-            y_ntt_bits += bit_length(ac)
+            y_ntt_bits += bit_length(c0)
         values["ntt-hw-y"] = y_ntt_hw
         values["ntt-bit-size-y"] = y_ntt_bits
 
@@ -2258,7 +2258,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(w):
             ac = abs(c0)
             w_hw += bit_count(c0)
-            w_bits += bit_length(ac)
+            w_bits += bit_length(c0)
         values["hw-w"] = w_hw
         values["bit-size-w"] = w_bits
 
@@ -2268,7 +2268,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(w_hat):
             ac = abs(c0)
             w_ntt_hw += bit_count(c0)
-            w_ntt_bits += bit_length(ac)
+            w_ntt_bits += bit_length(c0)
         values["ntt-hw-w"] = w_ntt_hw
         values["ntt-bit-size-w"] = w_ntt_bits
 
@@ -2278,7 +2278,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(c_s1):
             ac = abs(c0)
             cs1_hw += bit_count(c0)
-            cs1_bits += bit_length(ac)
+            cs1_bits += bit_length(c0)
         values["hw-c-s1"] = cs1_hw
         values["bit-size-c-s1"] = cs1_bits
 
@@ -2287,7 +2287,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(c_s1_hat):
             ac = abs(c0)
             cs1_ntt_hw += bit_count(c0)
-            cs1_ntt_bits += bit_length(ac)
+            cs1_ntt_bits += bit_length(c0)
         values["ntt-hw-c-s1"] = cs1_ntt_hw
         values["ntt-bit-size-c-s1"] = cs1_ntt_bits
 
@@ -2297,7 +2297,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(c_s2):
             ac = abs(c0)
             cs2_hw += bit_count(c0)
-            cs2_bits += bit_length(ac)
+            cs2_bits += bit_length(c0)
         values["hw-c-s2"] = cs2_hw
         values["bit-size-c-s2"] = cs2_bits
 
@@ -2306,7 +2306,7 @@ class Extract:
         for c0 in self._iter_vector_coeffs(c_s2_hat):
             ac = abs(c0)
             cs2_ntt_hw += bit_count(c0)
-            cs2_ntt_bits += bit_length(ac)
+            cs2_ntt_bits += bit_length(c0)
         values["ntt-hw-c-s2"] = cs2_ntt_hw
         values["ntt-bit-size-c-s2"] = cs2_ntt_bits       
 
@@ -2317,20 +2317,12 @@ class Extract:
         for c0 in self._iter_vector_coeffs(r0):
             ac = abs(c0)
             w0_hw += bit_count(c0)
-            w0_bits += bit_length(ac)
+            w0_bits += bit_length(c0)
             if ac > w0_inf:
                 w0_inf = ac
         values["hw-w-cs2-low-bits"] = w0_hw
         values["bit-size-w-cs2-low-bits"] = w0_bits
         values["inf-norm-w0"] = w0_inf
-
-        # ||z||_inf
-        z_inf = 0
-        for c0 in self._iter_vector_coeffs(z):
-            ac = abs(c0)
-            if ac > z_inf:
-                z_inf = ac
-        values["inf-norm-z"] = z_inf
 
         return values
 
@@ -2368,7 +2360,6 @@ class Extract:
             "ntt-bit-size-c-s2": {"window": 30},
             "hw-w-cs2-low-bits": {"window": 30},
             "bit-size-w-cs2-low-bits": {"window": 30},
-            "inf-norm-z": {"window": 5},
             "inf-norm-y": {"window": 5},
             "inf-norm-w0": {"window": 5},
         }
@@ -2426,7 +2417,7 @@ class Extract:
                     break
 
                 feats = self._ml_dsa_reconstruct_intermediates(
-                    ctx, sig, msg, external_mu=True, deterministic=True
+                    ctx, sig, msg, external_mu=False, deterministic=True
                 )
 
                 v_time = next(times_iterator)
@@ -2436,7 +2427,7 @@ class Extract:
 
         finally:
             status[2].set()
-            if self.verbose():
+            if self.verbose:
                 progress.join()
             print()
 
