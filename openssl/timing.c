@@ -149,13 +149,13 @@ int main(int argc, char *argv[]) {
     /* Open files */
     in_fd = open(in_file_name, O_RDONLY);
     if (in_fd == -1) {
-        fprintf(stderr, "can't open input file %s: %s", in_file_name, strerror(errno));
+        fprintf(stderr, "can't open input file %s: %s\n", in_file_name, strerror(errno));
         goto err;
     }
 
     out_fd = open(out_file_name, O_WRONLY|O_TRUNC|O_CREAT, 0666);
     if (out_fd == -1){
-        fprintf(stderr, "can't open output file %s: %s", out_file_name, strerror(errno));
+        fprintf(stderr, "can't open output file %s: %s\n", out_file_name, strerror(errno));
         goto err;
     }
 
@@ -234,7 +234,7 @@ int main(int argc, char *argv[]) {
 
     while((r_ret = read(in_fd, msg, msg_len)) > 0) {
         if ((size_t)r_ret != msg_len) {
-            fprintf(stderr, "read less data than expected");
+            fprintf(stderr, "read less data than expected\n");
             goto err;
         }
 
