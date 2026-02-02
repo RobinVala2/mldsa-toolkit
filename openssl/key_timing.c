@@ -279,12 +279,12 @@ err:
     result = 1;
 
 out:
-    if (msg) free(msg);
-    if (sig) free(sig);
-    if (key_buf) free(key_buf);
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    if (pkey) EVP_PKEY_free(pkey);
-    if (sig_alg) EVP_SIGNATURE_free(sig_alg);
+    free(msg);
+    free(sig);
+    free(key_buf);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    EVP_SIGNATURE_free(sig_alg);
     if (msg_fd >= 0) close(msg_fd);
     if (key_fd >= 0) close(key_fd);
     if (sig_fd >= 0) close(sig_fd);

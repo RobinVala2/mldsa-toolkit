@@ -277,11 +277,11 @@ err:
     result = 1;
 
 out:
-    if (msg) free(msg);
-    if (sig) free(sig);
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    if (sig_alg) EVP_SIGNATURE_free(sig_alg);
-    if (pkey) EVP_PKEY_free(pkey);
+    free(msg);
+    free(sig);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_SIGNATURE_free(sig_alg);
+    EVP_PKEY_free(pkey);
     if (in_fd >=0) close(in_fd);
     if (out_fd >=0) close(out_fd);
     if (time_fd >=0) close(time_fd);
