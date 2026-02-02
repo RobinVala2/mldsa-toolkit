@@ -20,7 +20,7 @@ static void help(const char *name) {
     fprintf(stderr, " -i file    File with concatenated messages to sign\n");
     fprintf(stderr, " -o file    File where to write the signatures\n");
     fprintf(stderr, " -t file    File where to write timing data\n");
-    fprintf(stderr, " -k file    File with the ML-DSA private keys in PEM format\n");
+    fprintf(stderr, " -k file    File with concatenated raw ML-DSA private keys\n");
     fprintf(stderr, " -n num     Length of individual messages in bytes\n");
     fprintf(stderr, " -s num     ML-DSA parameter set: 44, 65, or 87 (default: 44)\n");
     fprintf(stderr, " -h         This message\n");
